@@ -93,7 +93,27 @@ PAUSE_MINUTES = int(os.environ.get("PAUSE_MINUTES", 30))
 
 genai.configure(api_key=GEMINI_API_KEY)
 MODEL_NAME = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
+OWNER_NAME = os.environ.get("OWNER_NAME", "Laziz")
+
+# Business chatlar uchun ko'rsatma: bot egasining nomidan javob beradi
+BUSINESS_PROMPT = f"""Sen {OWNER_NAME}ning Telegram'dagi shaxsiy yordamchisisan.
+{OWNER_NAME} hozir telefonda emas (oflayn), shuning uchun unga yozgan odamlarga
+sen javob beryapsan.
+
+Qoidalar:
+- Suhbat boshida (faqat birinchi javobingda) qisqa qilib tanishtir: sen
+  {OWNER_NAME}ning yordamchisi ekaningni, u hozir aloqada emasligini va
+  imkon bo'lishi bilan o'zi javob berishini ayt.
+- O'zingni {OWNER_NAME}man deb ko'rsatma — sen uning yordamchisisan.
+- Suhbatdosh qaysi tilda yozsa, o'sha tilda javob ber (o'zbek, rus yoki boshqa).
+- Xushmuomala, samimiy va qisqa javob ber. Keraksiz uzun matn yozma.
+- Muhim yoki shoshilinch gap bo'lsa, uni {OWNER_NAME}ga yetkazilishini aytib,
+  xotirjam qil.
+- Oddiy savollarga bilganingcha yordam berishing mumkin, lekin {OWNER_NAME}
+  nomidan va'da berma, uning shaxsiy ishlari haqida taxmin qilma."""
+
 model = genai.GenerativeModel(MODEL_NAME)
+model_business = genai.GenerativeModel(MODEL_NAME, system_instruction=BUSINESS_PROMPT)
 
 chats = {}          # suhbat tarixlari
 owner_ids = {}      # business connection -> egasining user id'si
@@ -103,7 +123,8 @@ business_enabled = True  # /on va /off bilan boshqariladi
 
 def get_chat(chat_key: str):
     if chat_key not in chats:
-        chats[chat_key] = model.start_chat(history=[])
+        m = model_business if chat_key.startswith("biz_") else model
+        chats[chat_key] = m.start_chat(history=[])
     return chats[chat_key]
 
 
