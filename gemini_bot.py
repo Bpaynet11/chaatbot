@@ -1,7 +1,10 @@
 # -*- coding: utf-8 -*-
 """
 Gemini Telegram chatbot — Render uchun.
-Faqat savolga javob beradi va suhbatni davom ettiradi.
+Ikki rejimda ishlaydi:
+  1. Botning o'ziga yozilgan xabarlarga javob beradi
+  2. Telegram Business orqali ulansangiz, shaxsiy akkauntingizga
+     kelgan xabarlarga siz oflayn bo'lganingizda javob beradi
 
 Render Environment Variables:
     TELEGRAM_TOKEN  - @BotFather dan olingan token
@@ -22,20 +25,36 @@ GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 PORT = int(os.environ.get("PORT", 10000))
 
 genai.configure(api_key=GEMINI_API_KEY)
-
-# "gemini-flash-latest" — har doim eng yangi Flash modeliga avtomatik ulanadi,
-# model eskirib qolsa ham bot ishlashda davom etadi
 MODEL_NAME = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
 model = genai.GenerativeModel(MODEL_NAME)
 
-# Har bir foydalanuvchi uchun alohida suhbat tarixi
+# Har bir suhbat uchun alohida tarix
 chats = {}
 
+# Business connection egalarining ID'lari (o'z xabarimizga javob bermaslik uchun)
+owner_ids = {}
 
-def get_chat(user_id: int):
-    if user_id not in chats:
-        chats[user_id] = model.start_chat(history=[])
-    return chats[user_id]
+
+def get_chat(chat_key: str):
+    if chat_key not in chats:
+        chats[chat_key] = model.start_chat(history=[])
+    return chats[chat_key]
+
+
+def ask_gemini(chat_key: str, text: str):
+    """Geminidan javob olish; xato bo'lsa tarixni tozalab qayta urinadi."""
+    try:
+        return get_chat(chat_key).send_message(text).text
+    except Exception:
+        print("GEMINI XATOSI (1-urinish):")
+        traceback.print_exc()
+        chats.pop(chat_key, None)
+        try:
+            return get_chat(chat_key).send_message(text).text
+        except Exception:
+            print("GEMINI XATOSI (2-urinish):")
+            traceback.print_exc()
+            return None
 
 
 # --- HTTP server: Render bepul tarifi uchun kerak ---
@@ -58,46 +77,88 @@ def run_http_server():
     HTTPServer(("0.0.0.0", PORT), HealthHandler).serve_forever()
 
 
-# --- Xabarlarga javob ---
+# --- 1-rejim: botning o'ziga yozilgan xabarlar ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.text:
+    msg = update.message
+    if not msg or not msg.text:
         return
 
-    user_id = update.effective_user.id
-    text = update.message.text
+    await msg.chat.send_action("typing")
 
-    await update.message.chat.send_action("typing")
-
-    answer = None
-    try:
-        answer = get_chat(user_id).send_message(text).text
-    except Exception:
-        print("GEMINI XATOSI (1-urinish):")
-        traceback.print_exc()
-        # Tarixni tozalab bir marta qayta urinadi
-        chats.pop(user_id, None)
-        try:
-            answer = get_chat(user_id).send_message(text).text
-        except Exception:
-            print("GEMINI XATOSI (2-urinish):")
-            traceback.print_exc()
-            return  # foydalanuvchiga texnik xato ko'rsatmaydi
-
+    answer = ask_gemini(f"direct_{msg.chat.id}", msg.text)
     if not answer:
         return
 
-    # Telegram limiti 4096 belgi — uzun javobni bo'lib yuborish
     for i in range(0, len(answer), 4000):
-        await update.message.reply_text(answer[i:i + 4000])
+        await msg.reply_text(answer[i:i + 4000])
+
+
+# --- 2-rejim: Telegram Business orqali kelgan xabarlar ---
+async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.business_message
+    if not msg or not msg.text or not msg.from_user:
+        return
+
+    bc_id = msg.business_connection_id
+
+    # Akkaunt egasining ID'sini aniqlash (bir marta, keyin keshdan)
+    if bc_id not in owner_ids:
+        try:
+            conn = await context.bot.get_business_connection(bc_id)
+            owner_ids[bc_id] = conn.user.id
+        except Exception:
+            traceback.print_exc()
+            return
+
+    # Egasi o'zi yozgan xabarga javob bermaslik
+    if msg.from_user.id == owner_ids[bc_id]:
+        return
+
+    answer = ask_gemini(f"biz_{bc_id}_{msg.chat.id}", msg.text)
+    if not answer:
+        return
+
+    for i in range(0, len(answer), 4000):
+        await context.bot.send_message(
+            chat_id=msg.chat.id,
+            text=answer[i:i + 4000],
+            business_connection_id=bc_id,
+        )
+
+
+# --- TASHXIS: har bir kelgan yangilanishni logga yozish ---
+async def log_all_updates(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    kinds = []
+    if update.message: kinds.append("message")
+    if update.business_message: kinds.append("business_message")
+    if update.business_connection: kinds.append("business_connection")
+    if update.edited_business_message: kinds.append("edited_business_message")
+    if not kinds: kinds.append("boshqa_tur")
+    print(f"UPDATE KELDI: {', '.join(kinds)}")
 
 
 def main():
     threading.Thread(target=run_http_server, daemon=True).start()
     print(f"Model: {MODEL_NAME}")
+    print("TASHXIS REJIMI YONIQ - har bir update logga yoziladi")
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(MessageHandler(filters.TEXT, handle_message))
-    app.run_polling()
+
+    # Tashxis: hamma update'larni ko'rish (group=-1 birinchi ishlaydi)
+    from telegram.ext import TypeHandler
+    app.add_handler(TypeHandler(Update, log_all_updates), group=-1)
+
+    # Business xabarlar (shaxsiy akkaunt orqali)
+    app.add_handler(
+        MessageHandler(filters.UpdateType.BUSINESS_MESSAGE, handle_business_message)
+    )
+    # Oddiy xabarlar (botning o'ziga)
+    app.add_handler(
+        MessageHandler(filters.TEXT & filters.UpdateType.MESSAGE, handle_message)
+    )
+
+    # Business yangilanishlarini ham qabul qilish
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
