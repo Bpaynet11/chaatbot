@@ -20,6 +20,7 @@ Render Environment Variables:
 
 import os
 import time
+import asyncio
 import traceback
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -188,7 +189,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
     await msg.chat.send_action("typing")
-    answer = ask_gemini(f"direct_{msg.chat.id}", msg.text)
+    answer = await asyncio.to_thread(ask_gemini, f"direct_{msg.chat.id}", msg.text)
     if not answer:
         return
     await send_pretty(context.bot, msg.chat.id, answer)
@@ -225,7 +226,7 @@ async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_
     if last and time.time() - last < PAUSE_MINUTES * 60:
         return
 
-    answer = ask_gemini(f"biz_{bc_id}_{msg.chat.id}", msg.text)
+    answer = await asyncio.to_thread(ask_gemini, f"biz_{bc_id}_{msg.chat.id}", msg.text)
     if not answer:
         return
 
@@ -236,7 +237,7 @@ def main():
     threading.Thread(target=run_http_server, daemon=True).start()
     print(f"Model: {MODEL_NAME} | Pauza: {PAUSE_MINUTES} daqiqa")
 
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    app = Application.builder().token(TELEGRAM_TOKEN).concurrent_updates(True).build()
     app.add_handler(
         MessageHandler(filters.UpdateType.BUSINESS_MESSAGE, handle_business_message)
     )
