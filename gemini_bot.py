@@ -24,9 +24,67 @@ import traceback
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
+import re
+import html as html_lib
+
 import google.generativeai as genai
 from telegram import Update
 from telegram.ext import Application, MessageHandler, ContextTypes, filters
+
+
+def md_to_html(text: str) -> str:
+    """Gemini'ning Markdown javobini Telegram HTML formatiga o'girish."""
+    # Kod bloklarini vaqtincha olib qo'yish
+    code_blocks = []
+    def save_block(m):
+        code_blocks.append(m.group(1))
+        return f"\x00BLOCK{len(code_blocks)-1}\x00"
+    text = re.sub(r"```[a-zA-Z0-9]*\n?(.*?)```", save_block, text, flags=re.DOTALL)
+
+    inline_codes = []
+    def save_inline(m):
+        inline_codes.append(m.group(1))
+        return f"\x00INLINE{len(inline_codes)-1}\x00"
+    text = re.sub(r"`([^`\n]+)`", save_inline, text)
+
+    # HTML maxsus belgilarini himoyalash
+    text = html_lib.escape(text)
+
+    # Sarlavhalar: ### Matn -> qalin
+    text = re.sub(r"^#{1,6}\s+(.+)$", r"<b>\1</b>", text, flags=re.MULTILINE)
+    # Qalin: **matn**
+    text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text, flags=re.DOTALL)
+    # Kursiv: *matn* (ro'yxat belgisi bilan adashmaslik uchun so'z ichidagina)
+    text = re.sub(r"(?<!\w)\*(?!\s)(.+?)(?<!\s)\*(?!\w)", r"<i>\1</i>", text)
+    # Ro'yxat belgilari: qator boshidagi * yoki - -> •
+    text = re.sub(r"^(\s*)[\*\-]\s+", r"\1• ", text, flags=re.MULTILINE)
+
+    # Kod bloklarini qaytarish
+    for i, block in enumerate(code_blocks):
+        safe = html_lib.escape(block.strip())
+        text = text.replace(f"\x00BLOCK{i}\x00", f"<pre>{safe}</pre>")
+    for i, inline in enumerate(inline_codes):
+        safe = html_lib.escape(inline)
+        text = text.replace(f"\x00INLINE{i}\x00", f"<code>{safe}</code>")
+
+    return text
+
+
+async def send_pretty(bot, chat_id: int, answer: str, bc_id=None):
+    """Javobni chiroyli formatda yuborish; format xato bersa oddiy matnga o'tadi."""
+    pretty = md_to_html(answer)
+    for i in range(0, len(pretty), 4000):
+        chunk = pretty[i:i + 4000]
+        kwargs = {"chat_id": chat_id, "text": chunk}
+        if bc_id:
+            kwargs["business_connection_id"] = bc_id
+        try:
+            await bot.send_message(parse_mode="HTML", **kwargs)
+        except Exception:
+            # HTML buzilib qolsa (bo'lish teglarni kesib yuborsa) oddiy matn
+            plain = answer[i:i + 4000]
+            kwargs["text"] = plain
+            await bot.send_message(**kwargs)
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
@@ -112,8 +170,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     answer = ask_gemini(f"direct_{msg.chat.id}", msg.text)
     if not answer:
         return
-    for i in range(0, len(answer), 4000):
-        await msg.reply_text(answer[i:i + 4000])
+    await send_pretty(context.bot, msg.chat.id, answer)
 
 
 # --- 2-rejim: Telegram Business xabarlari ---
@@ -151,12 +208,7 @@ async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_
     if not answer:
         return
 
-    for i in range(0, len(answer), 4000):
-        await context.bot.send_message(
-            chat_id=msg.chat.id,
-            text=answer[i:i + 4000],
-            business_connection_id=bc_id,
-        )
+    await send_pretty(context.bot, msg.chat.id, answer, bc_id=bc_id)
 
 
 def main():
